@@ -54,6 +54,26 @@ class SecurityRequest(BaseModel):
 # MODERATION FUNCTION
 # ==============================
 
+# async def moderate_text(text: str):
+#     try:
+#         async with httpx.AsyncClient() as client:
+#             response = await client.post(
+#                 f"{OPENAI_BASE_URL}/moderations",
+#                 headers={
+#                     "Authorization": f"Bearer {OPENAI_API_KEY}",
+#                     "Content-Type": "application/json"
+#                 },
+#                 json={
+#                     "model": MODERATION_MODEL,
+#                     "input": text
+#                 },
+#                 timeout=30
+#             )
+#             response.raise_for_status()
+#             return response.json()
+#     except Exception:
+#         raise HTTPException(status_code=400, detail="Moderation service unavailable")
+
 async def moderate_text(text: str):
     try:
         async with httpx.AsyncClient() as client:
@@ -70,9 +90,10 @@ async def moderate_text(text: str):
                 timeout=30
             )
             response.raise_for_status()
-            return response.json()
+            return response.json(), None
     except Exception:
-        raise HTTPException(status_code=400, detail="Moderation service unavailable")
+        return None, "Moderation service unavailable"
+
 
 # ==============================
 # RATE LIMIT CHECK
@@ -99,29 +120,49 @@ def check_rate_limit(user_id: str):
 # ENDPOINT
 # ==============================
 
+# 
 @app.post("/validate")
 async def validate_content(req: SecurityRequest):
 
     if not req.input.strip():
-        raise HTTPException(status_code=400, detail="Input cannot be empty")
+        return {
+            "blocked": True,
+            "reason": "Input cannot be empty",
+            "sanitizedOutput": None,
+            "confidence": 0.0
+        }
 
-    check_rate_limit(req.userId)
+    try:
+        check_rate_limit(req.userId)
+    except HTTPException:
+        return {
+            "blocked": True,
+            "reason": "Rate limit exceeded",
+            "sanitizedOutput": None,
+            "confidence": 0.0
+        }
 
-    moderation_result = await moderate_text(req.input)
+    moderation_result, error = await moderate_text(req.input)
+
+    if error:
+        return {
+            "blocked": True,
+            "reason": error,
+            "sanitizedOutput": None,
+            "confidence": 0.0
+        }
 
     flagged = False
     confidence = 0.0
     reason = "Input passed all security checks"
 
-    # Extract moderation data
-    categories = moderation_result["results"][0]["categories"]
     category_scores = moderation_result["results"][0]["category_scores"]
 
     for category, score in category_scores.items():
         if score > CONFIDENCE_THRESHOLD:
             flagged = True
             confidence = score
-            reason = f"Blocked due to {category} (confidence {round(score,2)})"
+            reason = f"Blocked due to {category}"
             break
 
     if flagged:
@@ -135,7 +176,6 @@ async def validate_content(req: SecurityRequest):
             "confidence": round(confidence, 2)
         }
 
-    # If safe
     return {
         "blocked": False,
         "reason": reason,
